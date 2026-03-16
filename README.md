@@ -10,6 +10,11 @@ This fork is set up for local development and source execution on macOS, with:
 - `.env`-controlled local port selection
 - a reproducible macOS build script
 
+## Attribution
+
+- Original GeoPort project by `davesc63`
+- This fork has been modified with Codex assistance for local maintenance, debugging, and workflow updates
+
 ## Current Status
 
 - Tested locally on macOS with an iPhone 11 Pro Max on iOS `26.3`
