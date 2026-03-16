@@ -566,6 +566,84 @@ L.leafletMenu = function(a, b) {
       }
     }
 
+    function applyDefaultUiState() {
+      var darkModeSwitch = document.getElementById("darkModeSwitch");
+      var enableFuelPricesCheckbox = document.getElementById('enableFuelPrices');
+      var fuelRegionDropdown = document.getElementById('fuelRegion');
+      var coordinatesInput = document.getElementById('coordinates');
+
+      if (darkModeSwitch) {
+          darkModeSwitch.checked = true;
+          toggleDarkMode();
+      }
+
+      if (enableFuelPricesCheckbox) {
+          enableFuelPricesCheckbox.checked = true;
+          toggleFuelTypeVisibility();
+      }
+
+      if (fuelRegionDropdown) {
+          fuelRegionDropdown.value = 'NSW';
+      }
+
+      if (coordinatesInput && coordinatesInput.value.trim() === '') {
+          coordinatesInput.value = "{{ default_map_query }}";
+      }
+    }
+
+    function syncUiWithConnectionStatus(statusData) {
+        var connectTextElement = document.getElementById('connectText');
+        var connectButton = document.getElementById('connect');
+        var disconnectButton = document.getElementById('disconnect');
+        var deviceDropdown = document.getElementById('device');
+        var rsdDataElement = document.getElementById('rsdData');
+        var spinnerElement = document.getElementById('spinner');
+
+        if (!statusData) {
+            return;
+        }
+
+        if (statusData.status === 'connecting') {
+            connectTextElement.innerText = "Connecting, please wait...";
+            connectButton.disabled = true;
+            spinnerElement.style.display = 'inline-block';
+            return;
+        }
+
+        spinnerElement.style.display = 'none';
+
+        if (statusData.status === 'connected' && statusData.rsd_data) {
+            connectTextElement.innerText = "Connected";
+            connectButton.disabled = true;
+            disconnectButton.style.display = 'inline-block';
+            deviceDropdown.disabled = true;
+            rsdDataElement.value = `${statusData.rsd_data.host},${statusData.rsd_data.port}`;
+            activeSpoofLocation = null;
+            updateSetLocationButtonStatus();
+            updateStopLocationButtonStatus();
+            return;
+        }
+
+        connectTextElement.innerText = "Connect Device";
+        connectButton.disabled = false;
+        disconnectButton.style.display = 'none';
+        deviceDropdown.disabled = false;
+        rsdDataElement.value = '';
+        activeSpoofLocation = null;
+        updateSetLocationButtonStatus();
+        updateStopLocationButtonStatus();
+    }
+
+    function restoreConnectionState() {
+        fetch('/connection_status')
+            .then(response => response.json())
+            .then(data => {
+                console.log('connection status:', data);
+                syncUiWithConnectionStatus(data);
+            })
+            .catch(error => console.error('Error restoring connection state:', error));
+    }
+
 
 if (appVersionType === "standard") {
     var fuelTypeSection = document.getElementById('fuelTypeSection');
@@ -597,6 +675,13 @@ var marker; // Variable to store the marker
 var drawnItems = new L.FeatureGroup(); // Define the layer to add loaded files
 var gpxArray = []; // Array to store feature data
 var orangeIcon;
+const shellharbourLatLng = [-34.5795, 150.8710];
+const australiaBounds = L.latLngBounds(
+    L.latLng(-44.5, 112.0),
+    L.latLng(-9.0, 154.0)
+);
+let activeSpoofLocation = null;
+let pendingSpoofLocation = null;
 // Define arrays to store latitudes and longitudes for markers and lines
 var markerLatLngs = [];
 var lineLatLngs = [];
@@ -622,12 +707,10 @@ let isDrawingMode = false; // Flag to track drawing mode
 
 // Initialize the map
 async function initializeMap(userLocale) {
-    var userLocale = "{{ user_locale }}";
-    console.log('User locale:', userLocale);
-
-    // Create the map instance after obtaining coordinates
     map = L.map('map', {
-        keyboard: false // Disable keyboard navigation
+        keyboard: false,
+        maxBounds: australiaBounds,
+        maxBoundsViscosity: 1.0
     });
 
     // Create tile layers
@@ -708,13 +791,7 @@ async function initializeMap(userLocale) {
         maxZoom: 20
     });
 
-    // Use searchLocation to get coordinates based on userLocale
-    await searchLocation(userLocale);
-
     map.on('dblclick', handleMapDoubleClick);
-
-    // Set the zoom level to 4
-    map.setZoom(4);
 
     // // Use Stadia Maps as the tile layer
     // L.tileLayer('https://tiles.stadiamaps.com/tiles/osm_bright/{z}/{x}/{y}{r}.png', {
@@ -726,6 +803,7 @@ async function initializeMap(userLocale) {
 
     // Add default tile layer
     stadiaTileLayer.addTo(map);
+    map.setView(shellharbourLatLng, 11);
 
     // Define tile layer control options
     var baseLayers = {
@@ -1419,6 +1497,7 @@ let currentLayer = null;
 // Function to set coordinates
 function setCoordinates(lat, lng) {
     document.getElementById('coordinates').value = lat + ', ' + lng;
+    pendingSpoofLocation = `${lat},${lng}`;
     updateSetLocationButtonStatus();
     updateStopLocationButtonStatus(); // Add this line to update the Stop Location button status
     fetch('/update_location', {
@@ -1439,14 +1518,54 @@ function handleSearch() {
     searchLocation(input);
 }
 
+function parseCoordinates(input) {
+    if (!input) {
+        return null;
+    }
+
+    const coordinatePattern = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/;
+    const matches = input.match(coordinatePattern);
+    if (!matches) {
+        return null;
+    }
+
+    const lat = parseFloat(matches[1]);
+    const lng = parseFloat(matches[2]);
+
+    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+        return null;
+    }
+
+    return { lat, lng };
+}
+
 // Function to search location
 async function searchLocation(input, userLocale) {
-    // Initialize the OSM provider for searching
+    const directCoordinates = parseCoordinates(input);
+    if (directCoordinates) {
+        const { lat, lng } = directCoordinates;
+        if (!marker) {
+            marker = L.marker([lat, lng], { draggable: true }).addTo(map);
+            marker.on('dragend', handleMarkerDragEnd);
+            marker.on('contextmenu', handleMarkerRightClick);
+        } else {
+            marker.setLatLng([lat, lng]);
+        }
+        map.setView([lat, lng], 13);
+        setCoordinates(lat, lng);
+        return;
+    }
+
     var provider = new GeoSearch.OpenStreetMapProvider();
     try {
-        const results = await provider.search({ query: input });
+        const query = input && input.toLowerCase().includes('australia') ? input : `${input}, Australia`;
+        const results = await provider.search({ query });
         if (results.length > 0) {
             const { x, y } = results[0];
+            if (!australiaBounds.contains(L.latLng(y, x))) {
+                alert("Search result is outside Australia");
+                return;
+            }
             if (!marker) {
                 marker = L.marker([y, x], { draggable: true }).addTo(map);
                 marker.on('dragend', handleMarkerDragEnd); // Add event listener for marker drag
@@ -2028,7 +2147,7 @@ function connectDevice() {
         if ('error' in data) {
             // Display the error message as a popup or text on the page
             //alert(data.error); // You can use a better UI method here
-            showModalTimeout();
+            showAlertOrModal(data.error);
 
             // Reset connectTextElement
             if (connectTextElement) {
@@ -2042,6 +2161,25 @@ function connectDevice() {
             }
 
             // Stop processing the rest of the JavaScript
+            return;
+        }
+
+        const invalidRsdData = !('rsd_data' in data)
+            || !data.rsd_data
+            || (Array.isArray(data.rsd_data) && data.rsd_data.some(value => value === null || value === 'None'));
+
+        if (invalidRsdData) {
+            showAlertOrModal('Unable to establish device tunnel');
+
+            if (connectTextElement) {
+                connectTextElement.innerText = "Connect Device";
+                spinnerElement.style.display = 'none';
+            }
+
+            if (connectButton) {
+                connectButton.disabled = false;
+            }
+
             return;
         }
 
@@ -2141,7 +2279,7 @@ function showModalWifiModeRequired() {
         var connectButton = document.getElementById('connect');
         var disconnectButton = document.getElementById('disconnect');
         var deviceDropdown = document.getElementById('device');
-        stopLocation();
+        stopLocation(false);
         // Use navigator.sendBeacon to make the POST request without waiting for a response
         const data = JSON.stringify({});
         //navigator.sendBeacon('/stop_tunnel', data);
@@ -2178,6 +2316,19 @@ function showModalWifiModeRequired() {
         if (connectButton) {
             connectButton.disabled = false;
         }
+
+        activeSpoofLocation = null;
+        pendingSpoofLocation = null;
+        updateSetLocationButtonStatus();
+        updateStopLocationButtonStatus();
+
+        fetch('/release_connection', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
+        }).catch(error => console.error('Error releasing connection:', error));
     }
 
 
@@ -2261,6 +2412,9 @@ function setLocationArrows() {
         })
             .then(response => response.text())
             .then(data => {
+                activeSpoofLocation = pendingSpoofLocation;
+                updateSetLocationButtonStatus();
+                updateStopLocationButtonStatus();
                 displayToast(data); // Display response as a toast
                 console.log('set_location response:', data);
             })
@@ -2269,7 +2423,7 @@ function setLocationArrows() {
             });
     }
 
-    function stopLocation() {
+    function stopLocation(showToast = true) {
         fetch('/stop_location', {
             method: 'POST',
             headers: {
@@ -2279,7 +2433,12 @@ function setLocationArrows() {
         })
             .then(response => response.text())
             .then(data => {
-                displayToast(data); // Display response as a toast
+                activeSpoofLocation = null;
+                updateSetLocationButtonStatus();
+                updateStopLocationButtonStatus();
+                if (showToast) {
+                    displayToast(data); // Display response as a toast
+                }
                 console.log('stop_location response:', data);
             })
             .catch(error => {
@@ -2292,16 +2451,18 @@ function setLocationArrows() {
         var setLocationButton = document.getElementById('set-location');
         var rsdDataElement = document.getElementById('rsdData');
         var coordinatesInput = document.getElementById('coordinates');
-        var enableButton = rsdDataElement.value.trim() !== '' && coordinatesInput.value.trim() !== '';
-        setLocationButton.disabled = !enableButton;
+        var hasConnection = rsdDataElement.value.trim() !== '';
+        var hasCoordinates = coordinatesInput.value.trim() !== '';
+        var hasPendingChange = pendingSpoofLocation !== null && pendingSpoofLocation !== activeSpoofLocation;
+
+        setLocationButton.disabled = !(hasConnection && hasCoordinates && hasPendingChange);
+        setLocationButton.innerText = activeSpoofLocation ? 'Update Location' : 'Simulate Location';
     }
 
     // Function to enable or disable the Stop Location button based on conditions
     function updateStopLocationButtonStatus() {
         var stopLocationButton = document.getElementById('stop-location');
-        var rsdDataElement = document.getElementById('rsdData');
-        var enableButton = rsdDataElement.value.trim() !== '';
-        stopLocationButton.disabled = !enableButton;
+        stopLocationButton.disabled = activeSpoofLocation === null;
     }
 
     function exitApp() {
@@ -2484,11 +2645,13 @@ function continueAfterDeveloperModeRequired() {
 
 
 
-    document.addEventListener('DOMContentLoaded', function () {
+    document.addEventListener('DOMContentLoaded', async function () {
     console.log("test");
-    initializeMap();
-    searchLocation();
+    applyDefaultUiState();
+    await initializeMap();
+    handleSearch();
     handleFuelTypeChange();
+    restoreConnectionState();
     document.getElementById('rsdData').addEventListener('change', updateSetLocationButtonStatus);
     document.getElementById('coordinates').addEventListener('input', updateSetLocationButtonStatus);
     populateDeviceList();
@@ -2527,7 +2690,7 @@ function continueAfterDeveloperModeRequired() {
             <label class="mb-0" for="coordinates">Location:</label>
         </div>
         <div class="col">
-            <input type="text" class="form-control" id="coordinates">
+            <input type="text" class="form-control" id="coordinates" value="{{ default_map_query }}">
         </div>
         <div class="col-md-auto">
             <button type="button" class="btn btn-primary" id="search" onclick="handleSearch()">Search</button>

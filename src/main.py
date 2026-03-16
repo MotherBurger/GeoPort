@@ -3,7 +3,6 @@ import os
 import re
 import sys
 import time
-import pyuac
 import psutil
 import signal
 import socket
@@ -17,9 +16,11 @@ import subprocess
 import pycountry
 
 from flask import Flask, jsonify, render_template, request
+from dotenv import load_dotenv
 from urllib3.exceptions import InsecureRequestWarning, ConnectionError
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 
 from pymobiledevice3.usbmux import list_devices
 from pymobiledevice3.cli.mounter import auto_mount
@@ -36,7 +37,11 @@ from pymobiledevice3.osu.os_utils import get_os_utils
 from pymobiledevice3.bonjour import DEFAULT_BONJOUR_TIMEOUT, browse_mobdev2
 from pymobiledevice3.pair_records import get_local_pairing_record, get_remote_pairing_record_filename, get_preferred_pair_record
 from pymobiledevice3.common import get_home_folder
-from pymobiledevice3.cli.remote import cli_install_wetest_drivers
+
+try:
+    from pymobiledevice3.cli.remote import cli_install_wetest_drivers
+except ImportError:
+    cli_install_wetest_drivers = None
 
 from pymobiledevice3.cli.remote import tunnel_task
 from pymobiledevice3.lockdown import LockdownClient
@@ -60,6 +65,11 @@ OSUTILS = get_os_utils()
 
 import logging
 
+if sys.platform == 'win32':
+    import pyuac
+else:
+    pyuac = None
+
 
 # Get or create a logger instance named "GeoPort"
 logging.basicConfig(
@@ -72,10 +82,35 @@ logging.basicConfig(
 logger = logging.getLogger("GeoPort")
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+log_file_path = os.path.join(os.getcwd(), 'GeoPort.log')
+file_handler = RotatingFileHandler(log_file_path, maxBytes=2_000_000, backupCount=3)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(file_handler)
+
 logging.getLogger('werkzeug').disabled = True
 #log.disabled = True
 
 app = Flask(__name__)
+DEFAULT_MAP_QUERY = "Shellharbour NSW, Australia"
+
+
+def load_environment():
+    env_candidates = [
+        os.path.join(os.getcwd(), '.env'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'),
+        os.path.join(base_directory, '.env'),
+    ]
+
+    for env_path in env_candidates:
+        normalized_env_path = os.path.abspath(env_path)
+        if os.path.exists(normalized_env_path):
+            load_dotenv(normalized_env_path, override=False)
+            logger.info(f"Loaded environment from {normalized_env_path}")
+            return normalized_env_path
+
+    logger.info("No .env file found. Using defaults")
+    return None
 
 # Define constants
 # Get the home directory of the current user
@@ -110,6 +145,10 @@ APP_VERSION_TYPE = "fuel"
 terminate_tunnel_thread = False
 terminate_location_thread = False
 location_threads = []
+location_thread = None
+tunnel_thread = None
+connect_attempt_lock = threading.Lock()
+terminate_connect_attempt = False
 timeout = DEFAULT_BONJOUR_TIMEOUT
 
 # Get the current platform using sys.platform
@@ -187,17 +226,16 @@ def run_tunnel(service_provider):
         error_message = str(e)
 
         # Handle the exception, such as logging it or returning an error response
-        with app.app_context():
-            return jsonify({'error': error_message})
+        logger.error(f"Error in run_tunnel: {error_message}")
 
     #return
 
 # Define a function to start the tunnel thread
 def start_tunnel_thread(service_provider):
-    global terminate_tunnel_thread  # Declare the global variable
+    global terminate_tunnel_thread, tunnel_thread  # Declare the global variable
     terminate_tunnel_thread = False  # Set the value of the global variable
-    thread = threading.Thread(target=run_tunnel, args=(service_provider,))
-    thread.start()
+    tunnel_thread = threading.Thread(target=run_tunnel, args=(service_provider,), daemon=True)
+    tunnel_thread.start()
     return
 
 async def start_quic_tunnel(service_provider: RemoteServiceDiscoveryService) -> None:
@@ -248,17 +286,16 @@ def run_tcp_tunnel(service_provider):
         error_message = str(e)
 
         # Handle the exception, such as logging it or returning an error response
-        with app.app_context():
-            return jsonify({'error': error_message})
+        logger.error(f"Error in run_tcp_tunnel: {error_message}")
 
     #return
 
 # Define a function to start the tunnel thread
 def start_tcp_tunnel_thread(service_provider):
-    global terminate_tunnel_thread  # Declare the global variable
+    global terminate_tunnel_thread, tunnel_thread  # Declare the global variable
     terminate_tunnel_thread = False  # Set the value of the global variable
-    thread = threading.Thread(target=run_tcp_tunnel, args=(service_provider,))
-    thread.start()
+    tunnel_thread = threading.Thread(target=run_tcp_tunnel, args=(service_provider,), daemon=True)
+    tunnel_thread.start()
     return
 
 async def start_tcp_tunnel(service_provider: CoreDeviceTunnelProxy) -> None:
@@ -272,8 +309,7 @@ async def start_tcp_tunnel(service_provider: CoreDeviceTunnelProxy) -> None:
     #service = await create_core_device_tunnel_service_using_rsd(service_provider, autopair=True)
 
     lockdown = create_using_usbmux(udid, autopair=True)
-    #print("Lockdown for Windows: ", lockdown)
-    service = CoreDeviceTunnelProxy(lockdown)
+    service = await CoreDeviceTunnelProxy.create(lockdown)
     #asyncio.run(tunnel_task(service, secrets=None, protocol=TunnelProtocol.TCP), debug=True)
     async with service.start_tcp_tunnel() as tunnel_result:
         logger.info(f"TCP Address: {tunnel_result.address}")
@@ -389,12 +425,18 @@ def get_country_from_ip():
         country_name = "Spain"
         return country_name
 def get_devices_with_retry(max_attempts=10):
+    global terminate_connect_attempt
     if sys.platform == 'win32':
         logger.info(f"iOS Version: {ios_version}")
         if version_check(ios_version):
-            logger.info("Windows Driver Install Required")
-            cli_install_wetest_drivers()
+            if cli_install_wetest_drivers is not None:
+                logger.info("Windows Driver Install Required")
+                cli_install_wetest_drivers()
+            else:
+                logger.warning("Current pymobiledevice3 no longer exposes WeTest driver installation")
     for attempt in range(1, max_attempts + 1):
+        if terminate_connect_attempt:
+            raise RuntimeError("Connection attempt cancelled")
         try:
             devices = asyncio.run(get_rsds(timeout))
             #dev1 = asyncio.run(get_rsds(timeout))
@@ -412,9 +454,11 @@ def get_devices_with_retry(max_attempts=10):
 
 
 def get_wifi_with_retry(max_attempts=10):
-    global udid, wifi_address, wifi_port
+    global udid, wifi_address, wifi_port, terminate_connect_attempt
 
     for attempt in range(1, max_attempts + 1):
+        if terminate_connect_attempt:
+            raise RuntimeError("Connection attempt cancelled")
         try:
             logger.info("Discovering Wifi Devices - This may take a while...")
             devices = asyncio.run(get_remote_pairing_tunnel_services(timeout))
@@ -441,12 +485,17 @@ def get_wifi_with_retry(max_attempts=10):
         time.sleep(1)
 
     raise RuntimeError("No devices found after multiple attempts. Please see the FAQ.")
+def stop_tunnel_thread_internal():
+    global terminate_tunnel_thread, tunnel_thread
+    logger.info("stop tunnel thread")
+    terminate_tunnel_thread = True
+    if tunnel_thread is not None and tunnel_thread.is_alive():
+        tunnel_thread.join(timeout=2)
+
+
 @app.route('/stop_tunnel', methods=['POST'])
 def stop_tunnel_thread():
-    global terminate_tunnel_thread
-    logger.info("stop tunnel thread")
-    # Set the terminate flag to True to stop the thread
-    terminate_tunnel_thread = True
+    stop_tunnel_thread_internal()
     return jsonify("Tunnel stopped")
 
 @app.route('/api/data/<fuel_type>')
@@ -609,68 +658,76 @@ def enable_developer_mode_route():
 @app.route('/connect_device', methods=['POST'])
 def connect_device():
     global udid, connection_type, ios_version, rsd_data, rsd_host, rsd_port, wifi_address
+    global terminate_connect_attempt
+
+    if not connect_attempt_lock.acquire(blocking=False):
+        return jsonify({'error': 'Connection attempt already in progress'})
+
+    terminate_connect_attempt = False
 
     data = request.get_json()
     logger.info(f"Connect Device Data: {data}")
 
     # Extract the udid from the request
     udid = data.get('udid', None)
-    #ios_version = data.get('ios_version')
+    ios_version = data.get('ios_version')
 
     connection_type = data.get('connType')
 
 
 
-    if udid in rsd_data_map:
-        if connection_type in rsd_data_map[udid]:
-            logger.info(f"Connect_Device Map - Looking for {udid} in {connection_type}")
-            rsd_data = rsd_data_map[udid][connection_type]
+    try:
+        if udid in rsd_data_map:
+            if connection_type in rsd_data_map[udid]:
+                logger.info(f"Connect_Device Map - Looking for {udid} in {connection_type}")
+                rsd_data = rsd_data_map[udid][connection_type]
 
-            rsd_host = rsd_data['host']
-            rsd_port = rsd_data['port']
+                rsd_host = rsd_data['host']
+                rsd_port = rsd_data['port']
 
-            logger.info(f"RSD in udid mapping is: {rsd_data}")
-            logger.info("RSD already created. Reusing connection")
-            logger.info(f"RSD Data: {rsd_data}")
-            return jsonify({'rsd_data': rsd_data})
+                logger.info(f"RSD in udid mapping is: {rsd_data}")
+                if ios_version is not None and is_major_version_17_or_greater(ios_version):
+                    if is_tunnel_endpoint_active(rsd_host, rsd_port):
+                        logger.info("RSD already created. Reusing connection")
+                        logger.info(f"RSD Data: {rsd_data}")
+                        return jsonify({'rsd_data': rsd_data})
 
-        # If no matching entry found for the udid and desired connection type
-        logger.info(f"No matching RSD entry found for udid: {udid} and connection type: {connection_type}")
+                    logger.warning("Cached RSD connection is stale. Rebuilding tunnel")
+                    clear_cached_rsd_data()
+                else:
+                    logger.info("RSD already created. Reusing connection")
+                    logger.info(f"RSD Data: {rsd_data}")
+                    return jsonify({'rsd_data': rsd_data})
 
+            logger.info(f"No matching RSD entry found for udid: {udid} and connection type: {connection_type}")
 
-    # Check if developer mode is enabled, and enable it if not
-    #logger.info("Must be iOS17")
-    if not check_developer_mode(udid, connection_type):
-        # Display modal to inform the user and give options
-        return jsonify({'developer_mode_required': 'True'})
+        if not check_developer_mode(udid, connection_type):
+            return jsonify({'developer_mode_required': 'True'})
 
-    if connection_type == "USB":
-        return connect_usb(data)
+        if connection_type == "USB":
+            return connect_usb(data)
 
-    elif connection_type == "Network":
-        check_pair_record(udid)
+        if connection_type == "Network":
+            check_pair_record(udid)
 
-        if pair_record is None:
-            logger.error("No Pair Record Found. Please use a USB Cable to create one")
-            return jsonify({"Error": "No Pair Record Found"})
-        result = connect_wifi(data)
-        #result = await connect_wifi(data)
-        #return await connect_wifi(data)
-        return result
+            if pair_record is None:
+                logger.error("No Pair Record Found. Please use a USB Cable to create one")
+                return jsonify({"Error": "No Pair Record Found"})
+            return connect_wifi(data)
 
-    elif connection_type == "Manual":
-        check_pair_record(udid)
+        if connection_type == "Manual":
+            check_pair_record(udid)
 
-        if pair_record is None:
-            logger.error("No Pair Record Found. Please use a USB Cable to create one")
-            return jsonify({"Error": "No Pair Record Found"})
-        result = connect_wifi(data)
-        # result = await connect_wifi(data)
-        # return await connect_wifi(data)
-        return result
-    else:
+            if pair_record is None:
+                logger.error("No Pair Record Found. Please use a USB Cable to create one")
+                return jsonify({"Error": "No Pair Record Found"})
+            return connect_wifi(data)
+
         logger.error("Error: No matching connection type")
         return jsonify({"Error": "No matching connection type"})
+    finally:
+        if connect_attempt_lock.locked():
+            connect_attempt_lock.release()
 
 def check_rsd_data():
     max_attempts = 30
@@ -681,6 +738,148 @@ def check_rsd_data():
         time.sleep(1)
         attempts += 1
     return False  # Data is still None after all attempts
+
+
+def get_cached_rsd_data():
+    if udid in rsd_data_map and connection_type in rsd_data_map[udid]:
+        return rsd_data_map[udid][connection_type]
+    return None
+
+
+def clear_cached_rsd_data():
+    global rsd_host, rsd_port
+
+    if udid in rsd_data_map and connection_type in rsd_data_map[udid]:
+        del rsd_data_map[udid][connection_type]
+        if not rsd_data_map[udid]:
+            del rsd_data_map[udid]
+
+    rsd_host = None
+    rsd_port = None
+
+
+def is_tunnel_endpoint_active(host, port, timeout_seconds=1.0):
+    if not host or not port:
+        return False
+
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout_seconds):
+            return True
+    except OSError as e:
+        logger.warning(f"Tunnel health check failed for {host}:{port} - {e}")
+        return False
+
+
+def ensure_active_rsd_connection():
+    global rsd_host, rsd_port
+
+    if ios_version is None or not is_major_version_17_or_greater(ios_version):
+        return
+
+    cached_rsd_data = get_cached_rsd_data()
+    if cached_rsd_data is not None:
+        cached_host = cached_rsd_data.get('host')
+        cached_port = cached_rsd_data.get('port')
+        if is_tunnel_endpoint_active(cached_host, cached_port):
+            rsd_host = cached_host
+            rsd_port = cached_port
+            return
+
+        logger.warning("Cached tunnel is stale. Clearing it before reconnecting")
+        clear_cached_rsd_data()
+
+    stop_tunnel_thread_internal()
+
+    connect_data = {
+        'udid': udid,
+        'ios_version': ios_version,
+        'connType': connection_type,
+    }
+
+    if connection_type == "USB":
+        connect_usb(connect_data)
+    elif connection_type in ("Network", "Manual"):
+        connect_wifi(connect_data)
+    else:
+        raise RuntimeError(f"Unsupported connection type: {connection_type}")
+
+    if not check_rsd_data() or not is_tunnel_endpoint_active(rsd_host, rsd_port):
+        clear_cached_rsd_data()
+        raise RuntimeError("Unable to establish an active tunnel to the device")
+
+
+def get_connection_status_payload():
+    connected = False
+    active_rsd_data = get_cached_rsd_data()
+
+    if active_rsd_data is not None:
+        host = active_rsd_data.get('host')
+        port = active_rsd_data.get('port')
+        connected = is_tunnel_endpoint_active(host, port)
+        if not connected:
+            active_rsd_data = None
+
+    status = 'connecting' if connect_attempt_lock.locked() else 'disconnected'
+    if connected:
+        status = 'connected'
+
+    return {
+        'status': status,
+        'udid': udid,
+        'connection_type': connection_type,
+        'ios_version': ios_version,
+        'rsd_data': active_rsd_data,
+    }
+
+
+def release_connection_resources():
+    global rsd_data, terminate_connect_attempt
+
+    terminate_connect_attempt = True
+    stop_set_location_thread()
+    stop_tunnel_thread_internal()
+    clear_cached_rsd_data()
+    rsd_data = None
+
+
+@app.route('/connection_status', methods=['GET'])
+def connection_status():
+    return jsonify(get_connection_status_payload())
+
+
+@app.route('/release_connection', methods=['POST'])
+def release_connection():
+    release_connection_resources()
+    return jsonify({'success': True})
+
+
+def create_rsd_service_for_udid(udid):
+    devices = get_devices_with_retry()
+    logger.info(f"RSD Devices: {devices}")
+    matching_devices = [device for device in devices if device.udid == udid]
+    if not matching_devices:
+        raise RuntimeError(f"No RSD device found for {udid}")
+    return matching_devices[0]
+
+
+def connect_usb_rsd(udid):
+    logger.info("Attempting RSD/QUIC tunnel for USB connection")
+    rsd = create_rsd_service_for_udid(udid)
+    start_tunnel_thread(rsd)
+    if not check_rsd_data():
+        raise RuntimeError("RSD tunnel did not provide host/port within timeout")
+    return rsd_host, rsd_port
+
+
+def connect_usb_tcp(udid):
+    logger.info("Attempting TCP tunnel for USB connection")
+    global lockdown
+    lockdown = create_using_usbmux(udid, autopair=True)
+    logger.info(f"Create Lockdown {lockdown}")
+    start_tcp_tunnel_thread(lockdown)
+    if not check_rsd_data():
+        raise RuntimeError("TCP tunnel did not provide host/port within timeout")
+    return rsd_host, rsd_port
 
 def connect_usb(data):
     try:
@@ -700,55 +899,27 @@ def connect_usb(data):
 
         if ios_version is not None and is_major_version_17_or_greater(ios_version):
             logger.info("iOS 17+ detected")
-
-
             logger.info(f"iOS Version: {ios_version}")
-            if version_check(ios_version):
-                if sys.platform == 'win32':
-                    logger.warning("iOS is between 17.0 and 17.3.1, WHY?")
-                    logger.warning("You should upgrade to 17.4+")
-                    logger.error("We need to install a 3rd party driver for these versions")
-                    logger.error("which may stop working at any time")
-                    try:
-                        devices = get_devices_with_retry()
-                        logger.info(f"Devices: {devices}")
-                        rsd = [device for device in devices if device.udid == udid]
-                        if len(rsd) > 0:
-                            rsd = rsd[0]
-                        start_tunnel_thread(rsd)
+            tunnel_errors = []
 
-                    except RuntimeError as e:
-                        error_message = str(e)
-                        logger.error(f"Error: {error_message}")
-                        return jsonify({'error': 'No Devices Found'})
-                else:
-                    logger.warning("ios <17.4 on non-windows")
-                    try:
-                        devices = get_devices_with_retry()
-                        logger.info(f"Devices: {devices}")
-                        rsd = [device for device in devices if device.udid == udid]
-                        if len(rsd) > 0:
-                            rsd = rsd[0]
-                        start_tunnel_thread(rsd)
+            try:
+                rsd_data = connect_usb_tcp(udid)
+                logger.info(f"TCP tunnel data: {rsd_data}")
+            except RuntimeError as tcp_error:
+                error_message = str(tcp_error)
+                tunnel_errors.append(f"TCP: {error_message}")
+                logger.warning(f"TCP tunnel failed: {error_message}")
+                stop_tunnel_thread_internal()
+                clear_cached_rsd_data()
 
-                    except RuntimeError as e:
-                        error_message = str(e)
-                        logger.error(f"Error: {error_message}")
-                        return jsonify({'error': 'No Devices Found'})
-
-            else:
-                global lockdown
-                lockdown = create_using_usbmux(udid, autopair=True)
-                logger.info(f"Create Lockdown {lockdown}")
-                start_tcp_tunnel_thread(lockdown)
-
-
-            #time.sleep(3)
-            if not check_rsd_data():
-                logger.error("RSD Data is None, Perhaps the tunnel isn't established")
-            else:
-                rsd_data = rsd_host, rsd_port
-                logger.info(f"RSD Data: {rsd_data}")
+                try:
+                    rsd_data = connect_usb_rsd(udid)
+                    logger.info(f"RSD Data: {rsd_data}")
+                except RuntimeError as rsd_error:
+                    tunnel_errors.append(f"RSD: {rsd_error}")
+                    logger.error(f"RSD tunnel failed: {rsd_error}")
+                    clear_cached_rsd_data()
+                    return jsonify({'error': 'Unable to establish device tunnel', 'details': tunnel_errors})
 
             rsd_data_map.setdefault(udid, {})[connection_type] = {"host": rsd_host, "port": rsd_port}
             logger.info(f"Device Connection Map: {rsd_data_map}")
@@ -930,10 +1101,10 @@ async def start_wifi_quic_tunnel() -> None:
 
 # Define a function to start the tunnel thread
 def start_wifi_tunnel_thread():
-    global terminate_tunnel_thread
+    global terminate_tunnel_thread, tunnel_thread
     terminate_tunnel_thread = False  # Set the value of the global variable
-    thread = threading.Thread(target=run_wifi_tunnel)
-    thread.start()
+    tunnel_thread = threading.Thread(target=run_wifi_tunnel, daemon=True)
+    tunnel_thread.start()
     return
 
 # Entry point for running the tunnel async function
@@ -971,37 +1142,29 @@ async def set_location_thread(latitude, longitude):
     try:
         global rsd_host, rsd_port, udid, ios_version, connection_type
 
-        if udid in rsd_data_map:
-            if connection_type in rsd_data_map[udid]:
-                rsd_data = rsd_data_map[udid][connection_type]
-                rsd_host = rsd_data['host']
-                rsd_port = rsd_data['port']
+        if ios_version is not None and is_major_version_17_or_greater(ios_version):
+            ensure_active_rsd_connection()
+            rsd_data = get_cached_rsd_data()
+            logger.info(f"RSD in udid mapping is: {rsd_data}")
+            logger.info(f"RSD Data: {rsd_host}:{rsd_port}")
 
-                logger.info(f"RSD in udid mapping is: {rsd_data}")
-                logger.info("RSD already created. Reusing connection")
-                logger.info(f"RSD Data: {rsd_data}")
+            async with RemoteServiceDiscoveryService((rsd_host, rsd_port)) as sp_rsd:
+                with DvtSecureSocketProxyService(sp_rsd) as dvt:
+                    location_simulation = LocationSimulation(dvt)
+                    location_simulation.clear()
+                    location_simulation.set(latitude, longitude)
+                    logger.warning("Location Set Successfully")
+                    while not terminate_location_thread:
+                        await asyncio.sleep(0.5)
 
-
-                if ios_version is not None and is_major_version_17_or_greater(ios_version):
-                    async with RemoteServiceDiscoveryService((rsd_host, rsd_port)) as sp_rsd:
-                        with DvtSecureSocketProxyService(sp_rsd) as dvt:
-                            LocationSimulation(dvt).set(latitude, longitude)
-                            logger.warning("Location Set Successfully")
-                            #OSUTILS.wait_return()
-                            while not terminate_location_thread:
-                                time.sleep(0.5)
-
-
-                elif ios_version is not None and not is_major_version_17_or_greater(ios_version):
-                    with DvtSecureSocketProxyService(lockdown=lockdown) as dvt:
-                        LocationSimulation(dvt).clear()
-                        LocationSimulation(dvt).set(latitude, longitude)
-                        logger.warning("Location Set Successfully")
-                        #await asyncio.wait_for(OSUTILS.wait_return(), timeout=1)  # Adjust timeout as needed
-                        while not terminate_location_thread:
-                            time.sleep(0.5)
-
-                await asyncio.sleep(1)  # Adjust sleep time according to your requirements
+        elif ios_version is not None and not is_major_version_17_or_greater(ios_version):
+            with DvtSecureSocketProxyService(lockdown=lockdown) as dvt:
+                location_simulation = LocationSimulation(dvt)
+                location_simulation.clear()
+                location_simulation.set(latitude, longitude)
+                logger.warning("Location Set Successfully")
+                while not terminate_location_thread:
+                    await asyncio.sleep(0.5)
 
     except asyncio.CancelledError:
         # Handle cancellation gracefully
@@ -1015,32 +1178,21 @@ async def set_location_thread(latitude, longitude):
 
 # Function to start the set_location_thread in a separate thread
 def start_set_location_thread(latitude, longitude):
-    global terminate_location_thread
+    global terminate_location_thread, location_thread
     # Stop existing threads
     stop_set_location_thread()
+
+    if location_thread is not None and location_thread.is_alive():
+        location_thread.join(timeout=2)
 
     # Reset the terminate flag before starting the thread
     terminate_location_thread = False
 
-
-
-    # Define a helper function to run the async function in the thread
-    async def run_async_function():
-        await set_location_thread(latitude, longitude)
-
-    # Define a function to periodically check if the thread should terminate
-    def check_termination():
-        while not terminate_location_thread:
-            asyncio.run(asyncio.sleep(1))  # Adjust sleep time as needed
-        logger.info("Location Thread Terminated")
-
     # Create a new thread and start it
-    location_thread = threading.Thread(target=lambda: asyncio.run(run_async_function()))
+    location_thread = threading.Thread(
+        target=lambda: asyncio.run(set_location_thread(latitude, longitude)),
+        daemon=True)
     location_thread.start()
-
-    # Create a new thread for checking termination
-    termination_thread = threading.Thread(target=check_termination)
-    termination_thread.start()
 
 
 # Function to stop the location thread
@@ -1090,8 +1242,7 @@ def set_location():
         return jsonify({'error': error_message})
 
 
-@app.route('/stop_location', methods=['POST'])
-async def stop_location():
+async def stop_location_async():
     try:
         stop_set_location_thread()
         global rsd_data
@@ -1101,69 +1252,39 @@ async def stop_location():
         global ios_version, udid, connection_type
         logger.info(f"stop set location data:  {rsd_data}")
 
+        cached_rsd_data = get_cached_rsd_data()
+        if ios_version is None:
+            return 'Location cleared successfully'
 
-        if udid in rsd_data_map:
-            if connection_type in rsd_data_map[udid]:
-                rsd_data = rsd_data_map[udid][connection_type]
+        if ios_version is not None and is_major_version_17_or_greater(ios_version) and cached_rsd_data is None:
+            return 'Location cleared successfully'
 
-                rsd_host = rsd_data['host']
-                rsd_port = rsd_data['port']
 
-            if ios_version is not None and is_major_version_17_or_greater(ios_version):
+        if ios_version is not None and is_major_version_17_or_greater(ios_version):
+            ensure_active_rsd_connection()
+            if rsd_host is not None and rsd_port is not None:
                 async with RemoteServiceDiscoveryService((rsd_host, rsd_port)) as sp_rsd:
                     with DvtSecureSocketProxyService(sp_rsd) as dvt:
                         LocationSimulation(dvt).clear()
                         logger.warning("Location Cleared Successfully")
                 return 'Location cleared successfully'
-
-            elif ios_version is not None and not is_major_version_17_or_greater(ios_version):
-                with DvtSecureSocketProxyService(lockdown=lockdown) as dvt:
-
-                    LocationSimulation(dvt).clear()
-                    logger.warning("Location Cleared Successfully")
-                return 'Location cleared successfully'
+        elif ios_version is not None and not is_major_version_17_or_greater(ios_version):
+            with DvtSecureSocketProxyService(lockdown=lockdown) as dvt:
+                LocationSimulation(dvt).clear()
+                logger.warning("Location Cleared Successfully")
+            return 'Location cleared successfully'
         return 'Location cleared successfully'
     except Exception as e:
         error_message = str(e)
-        return jsonify({'error': error_message})
+        if error_message:
+            logger.error(f"Error clearing location: {error_message}")
+            return jsonify({'error': error_message})
+        return 'Location cleared successfully'
 
 
-def get_github_version():
-    try:
-        # Make a request to the GitHub API to get the content of CURRENT_VERSION file
-        url = f'https://raw.githubusercontent.com/{GITHUB_REPO}/main/{CURRENT_VERSION_FILE}'
-        response = requests.get(url)
-
-        response.raise_for_status()
-
-        # Parse the content of the file
-        github_version = response.text.strip()
-
-
-        return github_version
-    except requests.RequestException as e:
-
-        return None
-
-
-def get_github_broadcast():
-    try:
-        # Make a request to the GitHub API to get the content of CURRENT_VERSION file
-        url = f'https://raw.githubusercontent.com/{GITHUB_REPO}/main/{BROADCAST_FILE}'
-        logger.error(f"Github URL: {url}")
-
-        response = requests.get(url, verify=False)
-        logger.error(f"github response: {response}")
-        #response.raise_for_status()
-
-        # Parse the content of the file
-        github_broadcast = response.text.strip()
-        logger.error(f"GITHUB BROADCAST MESSAGE:")
-
-        return github_broadcast
-    except requests.RequestException as e:
-
-        return None
+@app.route('/stop_location', methods=['POST'])
+def stop_location():
+    return asyncio.run(stop_location_async())
 
 
 def remove_ansi_escape_codes(text):
@@ -1318,9 +1439,9 @@ def clear_old_geoport():
 
 def shutdown_server():
     logger.warning("shutdown server")
-    asyncio.run(stop_location())
+    asyncio.run(stop_location_async())
     stop_set_location_thread()
-    stop_tunnel_thread()
+    stop_tunnel_thread_internal()
     cancel_async_tasks()
     terminate_threads()
 
@@ -1380,33 +1501,17 @@ def exit_app():
 
 @app.route('/')
 def index():
-    # global error_message
     fetch_api_data(api_url)
-    # Get the GitHub version
-    github_version = get_github_version()
-    github_broadcast = get_github_broadcast()
     user_locale = get_user_country()
     logger.info(f"Country: {user_locale}")
     logger.info(f"Current platform: {platform}")
     logger.info(f"App Version = {APP_VERSION_NUMBER}")
     logger.info(f"base dir =  {base_directory}")
-    logger.info(f"GitHub Version = {github_version}")
 
-    #list_devices()
-    # Compare with the locally hardcoded version
-    if github_version and github_version > APP_VERSION_NUMBER:
-        version_message = f"Update available. New Version is {github_version}"
-
-    elif github_version and github_version < APP_VERSION_NUMBER:
-        version_message = f"Beta Testing. App version is {APP_VERSION_NUMBER} - github is {github_version}"
-
-    else:
-        version_message = None
-
-    return render_template('map.html', version_message=version_message, github_broadcast=github_broadcast,
+    return render_template('map.html', version_message=None, github_broadcast=None,
                            user_locale=user_locale, app_version_num=APP_VERSION_NUMBER,
                            app_version_type=APP_VERSION_TYPE, error_message=error_message, current_platform=platform,
-                           sudo_message=sudo_message)
+                           sudo_message=sudo_message, default_map_query=DEFAULT_MAP_QUERY)
 
 
 def open_browser():
@@ -1433,11 +1538,18 @@ def try_bind_listener_on_free_port():
     min_port = 49215
     max_port = 65535
 
-    # Check if --port argument is provided
     if args.port:
         chosen_port = args.port
     else:
-        chosen_port = flask_port
+        env_port = os.getenv('GEOPORT_PORT')
+        if env_port is not None:
+            try:
+                chosen_port = int(env_port)
+            except ValueError:
+                logger.warning(f"Invalid GEOPORT_PORT '{env_port}'. Falling back to {flask_port}")
+                chosen_port = flask_port
+        else:
+            chosen_port = flask_port
 
     if is_port_in_use(chosen_port):
         chosen_port = random.randint(min_port, max_port)
@@ -1446,6 +1558,7 @@ def try_bind_listener_on_free_port():
 
 
 if __name__ == '__main__':
+    load_environment()
     #create_geoport_folder()
     if is_windows:
         try:
@@ -1478,7 +1591,3 @@ if __name__ == '__main__':
     #threading.Thread(target=open_browser).start()
 
     app.run(debug=True, use_reloader=False, port=chosen_port, host='0.0.0.0')
-
-
-
-
