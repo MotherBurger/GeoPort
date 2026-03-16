@@ -1,112 +1,198 @@
-# GeoPort: Your Location, Anywhere! 🌍 
+# GeoPort
 
+GeoPort is a Flask + `pymobiledevice3` app for iPhone location simulation.
 
-<p align="center">
-  
-  <a href="https://www.buymeacoffee.com/davesc63">
-    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20beer&emoji=🍺&slug=davesc63&button_colour=FFDD00&font_colour=000000&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a beer">
-  </a><br> https://geoport.me
-</p>
+This fork is set up for local development and source execution on macOS, with:
 
+- USB spoofing working through a TCP tunnel first
+- RSD/QUIC retained as a fallback path
+- Australia-focused defaults
+- `.env`-controlled local port selection
+- a reproducible macOS build script
 
-[![Join Discord](https://img.shields.io/badge/Discord-Join%20Us-7289DA?logo=discord&style=for-the-badge)](https://discord.gg/genRca55Nb)<br>
-<a href="https://github.com/davesc63/GeoPort/releases/tag/v4.0.2">Release Notes and Downloads</a><br><p>
-<a href="https://github.com/davesc63/GeoPort/blob/main/FAQ.md">Need Help? - FAQ</a><br><p>
-<a href="https://www.surveymonkey.com/r/BLQ8M75">Your feedback helps - Fill out the Survey</a>
+## Current Status
 
-<p align="center"><strong>GeoPort needs your help.</p></strong> </p>
-Please consider <strong>donating</strong> and supporting the project. Your support helps to grow the platform and features.<br><p></p><br><p></p>
+- Tested locally on macOS with an iPhone 11 Pro Max on iOS `26.3`
+- USB connection and location spoofing work through the current TCP fallback path
+- RSD discovery may still fail on some newer iOS/macOS combinations, so it is not the primary path in this fork
 
+## Repository Layout
 
-Immerse yourself in a world of possibilities with **GeoPort**, the ultimate location simulation app. GeoPort allows you to take control of your virtual presence, letting you be anywhere on the globe at the touch of a button. Whether you want to explore distant cities, surprise friends with exotic check-ins, or test location-based apps, GeoPort is your passport to a limitless world.
+- `src/main.py`: backend Flask app and device/tunnel logic
+- `src/templates/map.html`: frontend UI
+- `requirements.txt`: Python dependencies
+- `build_macos.sh`: local PyInstaller build script
+- `.env.example`: local environment template
 
+## Requirements
 
+## macOS
 
-## Key Features
+- Python 3.11+
+- `sudo` access
+- iPhone connected by USB for first pairing
+- Developer Mode enabled on the device
 
-- **Global Presence**
-Spoof your location and appear as if you're in any city, country, or landmark globally.
+## Windows
 
-- **Explore with Ease**
-Experience the thrill of virtual travel without leaving your comfort zone. Wander the streets of Tokyo, relax on a beach in Bali, or stroll through the historic alleys of Rome—all from the palm of your hand.
+This repository still contains Windows-specific code paths, but this fork has been exercised primarily on macOS.
 
-- **Test Apps Effectively**
-Developers, take note! GeoPort is your go-to tool for testing location-based features in your apps. Simulate diverse scenarios effortlessly.
+## Setup
 
-- **Privacy and Security**
-Your privacy matters. GeoPort ensures a secure experience, allowing you to control when and where your virtual self appears.
+Create the virtual environment and install dependencies:
 
-- **User-Friendly Interface**
-Seamlessly navigate GeoPort's intuitive interface. Set your desired location with a few taps and teleport within seconds.
+```zsh
+cd "/path/to/GeoPort"
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip wheel setuptools
+python -m pip install -r requirements.txt
+```
 
-- **Unleash Your Imagination with GeoPort!**
-Download now and elevate your location experience beyond boundaries. Teleportation has never been this easy—**GeoPort**, where every location is just a click away!
+Create your local env file:
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/davesc63/GeoPort/main/images/geoport2.png" alt="geoport" width="50%"><br><br>
-   <img src="https://raw.githubusercontent.com/davesc63/GeoPort/main/images/geoport-demo.gif" alt="geoport">
-</p>
+```zsh
+cp .env.example .env
+```
 
-## Fuel Mode:
+Default `.env`:
 
-For the :australia: Aussies :australia: who love to fire up their choppers and get their *Frugal Fuels* from the KwikiMart.
-the **"Fuel"** mode of GeoPort to easily select the best prices across Australia! There is even the ability to select **state-based** pricing
+```env
+GEOPORT_PORT=3000
+```
 
-<p align="center">
-<img src="https://github.com/davesc63/GeoPort/blob/main/images/fuel.png" alt="fuel" width="50%">
-</p>
+Port priority is:
 
-## Developer Mode
+1. `--port`
+2. `GEOPORT_PORT` from `.env`
+3. fallback `54321`
 
-**Developer Mode:** Enable developer mode on connected iOS devices.
+## Run From Source
 
-They've made it harder to enable Developer Mode, but GeoPort handles it with ease. If you don't have Developer Mode enabled on your iOS device - you will need to temporarily remove your passcode to allow GeoPort to enable Developer Mode (Don't worry, GeoPort will let you know when running the app)
-<p align="center">
-<img src="https://github.com/davesc63/GeoPort/blob/main/images/devmode.png" alt="devmode" width="50%">
-</p>
+Start GeoPort:
 
-**Passcode Handling**
-<p align="center">
-<img src="https://github.com/davesc63/GeoPort/blob/main/images/passcode.png" alt="passcode" width="50%">
-</p>
+```zsh
+cd "/path/to/GeoPort"
+source .venv/bin/activate
+sudo .venv/bin/python src/main.py --no-browser
+```
 
+Then open:
 
+```text
+http://localhost:3000
+```
 
-## Prerequisites
+If you prefer a different port for one run:
 
-An iOS device and a sense of adventure!
-*That's Right* - you do not need to install complex apps like python for **GeoPort** to work
+```zsh
+sudo .venv/bin/python src/main.py --no-browser --port 54321
+```
 
-**Windows Users**
-You will need to install iTunes (we need their USB service so we can discover the iOS device!)
+## UI Defaults In This Fork
 
-## Installation
+- map starts in `Shellharbour NSW, Australia`
+- dark mode enabled by default
+- fuel mode enabled by default
+- searches are Australia-bound
+- direct `lat,lng` input is parsed as coordinates instead of being geocoded as a place name
 
-- [Download](https://github.com/davesc63/GeoPort/releases/) the package for your operating system
-- Run the application
-- Explore the world and **Simulate Location**
+## Logs
 
-## App Notes
-- iOS 17 & iOS 18 are supported on both Windows and Mac
-- Administrator / Sudo permissions are required for iOS17
-- If you forget to reset your location when you disconnect, Don't worry! Simply connect your device again and "Stop Location"
+GeoPort writes logs to:
 
-## Tech Stuff and recognition
-GeoPort is built with python, flask and pymobiledevice3
-Interface inspired by the popular iFakeLocation, GeoPort is built for familiarity with the addition of iOS17 and Windows support (Windows release imminent)
+```text
+GeoPort.log
+```
 
-Pymobiledevice3 - https://github.com/doronz88/pymobiledevice3<br>
-iFakeLocation - https://github.com/master131/iFakeLocation
+Useful command while testing:
 
-## Keywords
-iOS 17, location spoofing, ios17 location simulation, ios17 windows support<br>
-iOS 18, location spoofing, ios18 location simulation, ios18 windows support
+```zsh
+tail -n 200 GeoPort.log
+```
 
+## Typical Test Flow
 
-## Pay it forward
-If this tools helps you, please consider buying me a beer so I can keep this app going!<br>
-<p align="center">
-  <a href="https://www.buymeacoffee.com/davesc63">
-    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20beer&emoji=🍺&slug=davesc63&button_colour=FFDD00&font_colour=000000&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a beer">
-  </a>
-</p>
+1. Connect the iPhone by USB
+2. Unlock the phone
+3. Confirm Developer Mode is enabled
+4. Open GeoPort in the browser
+5. Click `Connect`
+6. Pick a location on the map
+7. Click `Simulate Location`
+8. Verify the phone location changed
+9. Click `Stop Location`
+
+Frontend behavior in this fork:
+
+- `Stop Location` stays disabled until a spoof is active
+- after moving the marker again, the left button changes from `Simulate Location` to `Update Location`
+
+## Build macOS App
+
+Build the bundled app with PyInstaller:
+
+```zsh
+./build_macos.sh
+```
+
+Output:
+
+```text
+dist/GeoPort.app
+```
+
+Run the built app binary directly:
+
+```zsh
+sudo dist/GeoPort.app/Contents/MacOS/GeoPort --no-browser
+```
+
+## Tunnel Behavior
+
+For modern iOS in this fork:
+
+- USB TCP tunnel is attempted first
+- RSD/QUIC is used as fallback
+
+This is intentional. On the tested iOS `26.3` setup, RSD discovery reported `No devices found` while the TCP path still connected and spoofed successfully.
+
+## Troubleshooting
+
+## `Connect` spins or fails
+
+- check `GeoPort.log`
+- make sure the phone is unlocked
+- make sure the process is running with `sudo`
+- reconnect the USB cable
+- verify Developer Mode is enabled on the phone
+
+## `No devices found` appears in logs
+
+If spoofing still succeeds afterward, that may only mean the RSD path failed and TCP fallback succeeded. Check the log for:
+
+```text
+Attempting TCP tunnel for USB connection
+TCP Address:
+TCP Port:
+Location Set Successfully
+```
+
+## Location lands in the wrong place
+
+Use a plain coordinate string:
+
+```text
+-33.88321, 151.22051
+```
+
+This fork parses numeric coordinates directly before geocoding.
+
+## Disconnect / refresh state looks wrong
+
+The frontend now restores connection state from the backend and releases active connections on disconnect. If behavior looks stale, refresh once and inspect `GeoPort.log`.
+
+## Notes
+
+- This fork is focused on practical local execution rather than mirroring upstream release packaging/docs.
+- The upstream README/release information is no longer the source of truth for this fork’s behavior.
