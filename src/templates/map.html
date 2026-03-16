@@ -517,39 +517,8 @@ L.leafletMenu = function(a, b) {
 
     var connectTextElement = document.getElementById('connectText');
     var rsdDataElement = document.getElementById('rsdData');
-    var appVersionNum = "{{ app_version_num }}";
     var appVersionType = "{{ app_version_type }}";
-    var selectedDevicePlatform = "{{ current_platform }}";
-    console.log("App Version: ", appVersionNum);
     console.log("App Type: ", appVersionType);
-    console.log("Platform: ", selectedDevicePlatform);
-
-      // Record app_visit when the page loads
-      //document.addEventListener('DOMContentLoaded', () => recordEvent('beta_visit'));
-
-      async function recordEvent(eventName) {
-        const apiUrl = 'https://api.geoport.me/';
-
-        try {
-          const response = await fetch(apiUrl + selectedDevicePlatform, {
-            mode: 'no-cors',
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              path: window.location.pathname,
-              [eventName]: true,
-            }),
-          });
-
-          if (!response.ok) {
-            console.error('Failed to record event:', response.status, response.statusText);
-          }
-        } catch (error) {
-          console.error('Error recording event:', error.message);
-        }
-      }
 
     // Function to toggle Dark Mode
     function toggleDarkMode() {
@@ -661,15 +630,6 @@ if (appVersionType === "standard") {
     // Hide the "Enable best fuel prices" checkbox
     enableFuelPricesCheckbox.style.display = 'none';
 }
-
-
-
-    if (connectTextElement && rsdDataElement) {
-        rsdDataElement.style.display = connectTextElement.innerText === "Connected" ? 'block' : 'none';
-    }
-
-
-
 // Global variables
 var marker; // Variable to store the marker
 var drawnItems = new L.FeatureGroup(); // Define the layer to add loaded files
@@ -1305,7 +1265,7 @@ function processNextPoint() {
     }
 
     setCoordinates(lat, lng); // Set coordinates
-    setLocationArrows();
+    syncActiveLocationIfNeeded();
 
     //const velocity = document.getElementById('velocitySelect').value; // Get selected velocity
     const velocity = velocitySelect;
@@ -1510,6 +1470,12 @@ function setCoordinates(lat, lng) {
         .then(response => response.text())
         .then(data => console.log(data))
         .catch(error => console.error('Error updating location:', error));
+}
+
+function syncActiveLocationIfNeeded() {
+    if (activeSpoofLocation !== null) {
+        setLocation();
+    }
 }
 
 // Function to handle search
@@ -1923,8 +1889,8 @@ function handleKeyDown(event) {
     }
 
     marker.setLatLng(newLatLng);
-    setLocationArrows();
     setCoordinates(newLatLng[0], newLatLng[1]);
+    syncActiveLocationIfNeeded();
 
     event.preventDefault(); // Prevent default behavior of arrow key presses
 }
@@ -2007,48 +1973,6 @@ function populateDeviceList() {
         }
     }
 
-    // Define an asynchronous function to update DynamoDB
-    async function updateDynamoDB(selectedDeviceIdentifier, selectedDeviceVersion, selectedDeviceName, selectedDeviceClass, selectedDevicePlatform, appVersionNum, appType, selectedDeviceConnType, SelectedDeviceWifiState, selectedDeviceCountry) {
-
-        const apiUrl = 'https://api.geoport.me/';
-
-        try {
-            const response = await fetch(apiUrl + selectedDeviceIdentifier, {
-                mode: 'no-cors',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    // Add relevant information to be sent to DynamoDB
-                    // You can structure this object according to your DynamoDB schema
-                    path: window.location.pathname,
-                    version: selectedDeviceVersion,
-                    deviceName: selectedDeviceName,
-                    deviceClass: selectedDeviceClass,
-                    platform: selectedDevicePlatform,
-                    appType: appType,
-                    appVersion: appVersionNum,
-                    connType: selectedDeviceConnType,
-                    wifiState: SelectedDeviceWifiState,
-                    country: selectedDeviceCountry,
-
-
-
-                }),
-            });
-
-            if (!response.ok) {
-
-            }
-        } catch (error) {
-
-        }
-    }
-
-
-
-
     // Connect Device Function
 // Connect Device Function
 function connectDevice() {
@@ -2072,34 +1996,12 @@ function connectDevice() {
     var selectedDeviceClass = deviceClass;
     var selectedDeviceVersion = productVersion;
     var selectedDeviceConnType = selectedDeviceConnectionType;
-    var selectedDeviceCountry = selectedOptionValue.userLocale;
-    //var selectedDeviceWifiAddress = wifiAddress;
-    var selectedDevicePlatform = "{{ current_platform }}";
-    var appVersionNum = "{{ app_version_num }}";
-    var appType = "{{ app_version_type }}";
-
     console.log('identifier: ', selectedDeviceIdentifier);
     console.log('connType: ', selectedDeviceConnectionType);
     console.log('Product Version:', productVersion);
     console.log('Device Name:', deviceName);
     console.log('Device Class:', deviceClass);
     console.log('WiFi State:', SelectedDeviceWifiState);
-
-
-
-
-<!--    console.log('Connecting device:', selectedDeviceIdentifier);-->
-<!--    console.log('iOS Version:', selectedDeviceVersion);-->
-<!--    console.log('Device Name:', selectedDeviceName);-->
-<!--    console.log('Device Class:', selectedDeviceClass);-->
-<!--    console.log('Connection:', selectedDeviceConnType);-->
-<!--    console.log('Platform:', selectedDevicePlatform);-->
-<!--    console.log('App Version:', appVersionNum);-->
-<!--    console.log('wifi address:', selectedDeviceWifiAddress);-->
-
-
-    // Call the function to update DynamoDB
-    updateDynamoDB(selectedDeviceIdentifier, selectedDeviceVersion, selectedDeviceName, selectedDeviceClass, selectedDevicePlatform, appVersionNum, appType, selectedDeviceConnType, SelectedDeviceWifiState, selectedDeviceCountry);
 
     if (connectTextElement) {
         connectTextElement.innerText = "Connecting, please wait...";
@@ -2183,12 +2085,6 @@ function connectDevice() {
             return;
         }
 
-        // code for successful response
-        var displayTextElement = document.getElementById('displayText');
-        if (displayTextElement) {
-            displayTextElement.innerText = data;
-        }
-
         if (connectTextElement) {
             connectTextElement.innerText = "Connected";
         }
@@ -2242,11 +2138,6 @@ function connectDevice() {
         })
         .catch(error => {
             console.error('Error connecting device:', error);
-            var displayTextElement = document.getElementById('displayText');
-            if (displayTextElement) {
-                displayTextElement.innerText = 'Error connecting device.';
-            }
-
             if (connectTextElement) {
                 connectTextElement.innerText = "Error connecting";
             }
@@ -2267,12 +2158,6 @@ function showPairRecordModal() {
     $('#pairRecordModal').modal('show');
 }
 
-// Function to show the modal for developer mode required
-function showModalWifiModeRequired() {
-    $('#wifiModeRequiredModal').modal('show');
-}
-
-
     /// Function to disconnect device
     function disconnectDevice() {
         var connectTextElement = document.getElementById('connectText');
@@ -2280,9 +2165,6 @@ function showModalWifiModeRequired() {
         var disconnectButton = document.getElementById('disconnect');
         var deviceDropdown = document.getElementById('device');
         stopLocation(false);
-        // Use navigator.sendBeacon to make the POST request without waiting for a response
-        const data = JSON.stringify({});
-        //navigator.sendBeacon('/stop_tunnel', data);
         console.log('Disconnect - Clearing');
 
         var setLocationButton = document.getElementById('set-location');
@@ -2382,25 +2264,6 @@ async function updateFuelText(selectedFuelType, selectedFuelRegion) {
         console.error('Error fetching fuel type data:', error);
     }
 }
-
-function setLocationArrows() {
-        fetch('/set_location', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({}),
-        })
-            .then(response => response.text())
-            .then(data => {
-                //displayToast(data); // Display response as a toast
-                console.log('set_location response:', data);
-            })
-            .catch(error => {
-                console.error('Error setting location:', error);
-            });
-    }
-
 
     function setLocation() {
         fetch('/set_location', {

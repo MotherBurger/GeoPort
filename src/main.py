@@ -1,10 +1,7 @@
-import locale
 import os
-import re
 import sys
 import time
 import psutil
-import signal
 import socket
 import random
 import asyncio
@@ -13,40 +10,32 @@ import requests
 import threading
 import webbrowser
 import subprocess
-import pycountry
 
 from flask import Flask, jsonify, render_template, request
 from dotenv import load_dotenv
 from urllib3.exceptions import InsecureRequestWarning, ConnectionError
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
-from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 
 from pymobiledevice3.usbmux import list_devices
 from pymobiledevice3.cli.mounter import auto_mount
 from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp, get_mobdev2_lockdowns
 from pymobiledevice3.services.amfi import AmfiService
-from pymobiledevice3.exceptions import DeviceHasPasscodeSetError, NoDeviceConnectedError
+from pymobiledevice3.exceptions import DeviceHasPasscodeSetError
 from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
 from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
 from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
 from pymobiledevice3.remote.utils import stop_remoted_if_required, resume_remoted_if_required, get_rsds
-from pymobiledevice3.remote.tunnel_service import create_core_device_tunnel_service_using_rsd, get_remote_pairing_tunnel_services, start_tunnel, create_core_device_tunnel_service_using_remotepairing, get_core_device_tunnel_services, CoreDeviceTunnelProxy
-#from pymobiledevice3.cli.remote import install_driver_if_required
+from pymobiledevice3.remote.tunnel_service import create_core_device_tunnel_service_using_rsd, get_remote_pairing_tunnel_services, create_core_device_tunnel_service_using_remotepairing, CoreDeviceTunnelProxy
 from pymobiledevice3.osu.os_utils import get_os_utils
-from pymobiledevice3.bonjour import DEFAULT_BONJOUR_TIMEOUT, browse_mobdev2
-from pymobiledevice3.pair_records import get_local_pairing_record, get_remote_pairing_record_filename, get_preferred_pair_record
+from pymobiledevice3.bonjour import DEFAULT_BONJOUR_TIMEOUT
+from pymobiledevice3.pair_records import get_remote_pairing_record_filename, get_preferred_pair_record
 from pymobiledevice3.common import get_home_folder
 
 try:
     from pymobiledevice3.cli.remote import cli_install_wetest_drivers
 except ImportError:
     cli_install_wetest_drivers = None
-
-from pymobiledevice3.cli.remote import tunnel_task
-from pymobiledevice3.lockdown import LockdownClient
-from pymobiledevice3.lockdown_service_provider import LockdownServiceProvider
-from pymobiledevice3.remote.common import TunnelProtocol
 
 #========= Arg Parser ========
 # Parse command-line arguments
@@ -93,6 +82,7 @@ logging.getLogger('werkzeug').disabled = True
 
 app = Flask(__name__)
 DEFAULT_MAP_QUERY = "Shellharbour NSW, Australia"
+DEFAULT_COUNTRY = "Australia"
 
 
 def load_environment():
@@ -137,14 +127,10 @@ pair_record = None
 error_message = None
 sudo_message = ""
 captured_output = None
-GITHUB_REPO = 'davesc63/GeoPort'
-CURRENT_VERSION_FILE = 'CURRENT_VERSION'
-BROADCAST_FILE = 'BROADCAST'
 APP_VERSION_NUMBER = "2.3.3"
 APP_VERSION_TYPE = "fuel"
 terminate_tunnel_thread = False
 terminate_location_thread = False
-location_threads = []
 location_thread = None
 tunnel_thread = None
 connect_attempt_lock = threading.Lock()
@@ -380,29 +366,7 @@ def version_check(version_string):
         return False
 
 def get_user_country():
-    global user_locale
-    try:
-        # Attempt to get the user's country using locale and pycountry
-        user_locale, _ = locale.getlocale()
-
-        if user_locale is None:
-            logger.warning("User locale is None. Defaulting to IP geolocation service.")
-            return get_country_from_ip()
-
-        country_code = user_locale.split('_')[-1]
-        country = pycountry.countries.get(alpha_2=country_code)
-        country_name = country.name if country else None
-
-        # If country_name is None, try IP geolocation service as a fallback
-        if country_name is None:
-            logger.warning("Failed to retrieve country name using locale. Using IP geolocation service.")
-            return get_country_from_ip()
-        else:
-            return country_name
-
-    except Exception as e:
-        logger.error(f"Error getting user country: {e}")
-        return None
+    return DEFAULT_COUNTRY
 
 
 def get_country_from_ip():
@@ -1287,15 +1251,6 @@ def stop_location():
     return asyncio.run(stop_location_async())
 
 
-def remove_ansi_escape_codes(text):
-    ansi_escape = re.compile(r'\x1b[^m]*m')
-    return ansi_escape.sub('', text)
-
-async def get_network_devices():
-# you can also query network lockdown instances using the following:
-    async for ip, lockdown in get_mobdev2_lockdowns():
-        print(ip, lockdown.short_info)
-
 @app.route('/list_devices')
 def py_list_devices():
     try:
@@ -1423,69 +1378,11 @@ def clear_geoport():
         logger.warning("No GeoPort found")
 
 
-def clear_old_geoport():
-    logger.info("clear old GeoPort instances")
-    substring = "GeoPort"
-
-    current_pid = os.getpid()
-
-    for process in psutil.process_iter(['pid', 'name']):
-        if substring in process.info['name'] and process.info['pid'] != current_pid:
-            logger.info(f"Found process: {process.info['pid']} - {process.info['name']}")
-
-            # Terminate the process
-            process.terminate()
-
-
 def shutdown_server():
     logger.warning("shutdown server")
     asyncio.run(stop_location_async())
-    stop_set_location_thread()
-    stop_tunnel_thread_internal()
-    cancel_async_tasks()
-    terminate_threads()
-
-
-    # Terminate the current process
-    clear_geoport()
-
-    logger.error("OS Kill")
-    os.kill(os.getpid(), signal.SIGINT)
-    list_threads()
-    terminate_threads()
-    logger.error("sys exit")
+    release_connection_resources()
     os._exit(0)
-
-
-def terminate_threads():
-    """
-    Terminate all threads.
-    """
-    for thread in threading.enumerate():
-        if thread != threading.main_thread():
-            logger.info(f"thread: {thread}")
-            terminate_flag = threading.Event()
-            terminate_flag.set()
-            #thread.terminate()  # Terminate the thread
-
-def list_threads():
-    """
-    Terminate all threads.
-    """
-    for thread in threading.enumerate():
-        logger.info(f"thread: {thread}")
-def cancel_async_tasks():
-    try:
-        #loop = asyncio.get_running_loop()
-        tasks = asyncio.all_tasks()
-        for task in tasks:
-            logger.info(f"task: {task}")
-            task.cancel()
-    except RuntimeError as e:
-        if "no running event loop" in str(e):
-            logger.error("No running event loop found.")
-        else:
-            raise e  # Re-raise the error if it's not related to the event loop
 
 
 
@@ -1502,7 +1399,7 @@ def exit_app():
 @app.route('/')
 def index():
     fetch_api_data(api_url)
-    user_locale = get_user_country()
+    user_locale = DEFAULT_COUNTRY
     logger.info(f"Country: {user_locale}")
     logger.info(f"Current platform: {platform}")
     logger.info(f"App Version = {APP_VERSION_NUMBER}")
