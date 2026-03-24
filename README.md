@@ -94,6 +94,36 @@ If you prefer a different port for one run:
 sudo .venv/bin/python src/main.py --no-browser --port 54321
 ```
 
+## VS Code Debugging
+
+This repository now includes workspace settings for `F5` debugging in VS Code:
+
+- interpreter: `${workspaceFolder}/.venv/bin/python`
+- env file: `${workspaceFolder}/.env`
+- launch target: `src/main.py`
+- default debug args: `--no-browser`
+
+Before using `F5`, set up the virtual environment:
+
+```zsh
+cd "/path/to/GeoPort"
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip wheel setuptools
+python -m pip install -r requirements.txt
+```
+
+Then in VS Code:
+
+1. Open the repository folder
+2. Select the `GeoPort: Debug Current App` launch configuration
+3. Press `F5`
+
+Note for macOS:
+
+- `F5` starts the Flask app in the debugger
+- device tunnel and spoofing operations may still require a separate `sudo` run, because VS Code's normal Python launch configuration does not elevate privileges automatically
+
 ## UI Defaults In This Fork
 
 - map starts in `Shellharbour NSW, Australia`
